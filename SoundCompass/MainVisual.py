@@ -14,6 +14,11 @@ pygame.display.set_caption("PD + Interactive Animations")
 WHITE = (255, 255, 255)
 clock = pygame.time.Clock()
 
+# Double-click variables
+last_click_time = 0
+DOUBLE_CLICK_TIME = 300  # ms
+fullscreen = False
+
 # --------------------------------------------------------------------------------
 # 1) Socket Logic (PD -> Python)
 # --------------------------------------------------------------------------------
@@ -81,42 +86,29 @@ thread.start()
 # 2) Interactive Animation Setup (Arcs, Gauge, Handle, etc.)
 # --------------------------------------------------------------------------------
 
-# Circle images (not scaled)
 mask_surf, mask_rect         = load_image_centered("Mask.png")
 boldcircle_surf, boldcircle_rect = load_image_centered("BoldCircle.png")
 thincircle_surf, thincircle_rect = load_image_centered("ThinCircle.png")
 
-# Arcs (enlarged on mouse press, animated back)
 thickarc_surf, thickarc_rect = load_image_centered("ThickArc.png")
 thinarc_surf, thinarc_rect   = load_image_centered("ThinArc.png")
 
-# Gauge (scales & rotates based on handle speed)
 gauge_surf, gauge_rect = load_image_centered("Gauge.png")
-
-# Handle (rotation only, not scaled)
 handle_surf, handle_rect = load_image_centered("Handle.png")
 
-# We'll keep any lines/dots from PD beneath all of these.
-
-# Animation variables
-# Lines/dots scale factor is separate if you like, but let's keep it at 1.0 or custom
-# We'll focus on arcs + gauge scale, handle rotation
 arc_scale_current  = 1.0
 arc_scale_target   = 1.0
 gauge_scale_current = 1.0
 gauge_scale_target  = 1.0
-gauge_angle         = 0.0  # rotation in degrees
-gauge_rot_speed_factor = 2.0  # how strongly gauge spins relative to handle rotation
+gauge_angle         = 0.0
+gauge_rot_speed_factor = 2.0
 handle_angle = 0.0
 
-# For handle snapping
 SNAP_ANGLES = [90, 180]
 
-# For a simple lines/dots scale if you want (clamped min=1.0):
 lines_scale_factor = 1.0
 MAX_SCALE = 5.0
 
-# Mouse logic
 dragging = False
 old_angle = 0.0
 
@@ -127,11 +119,9 @@ def get_mouse_angle(mx, my):
     return math.degrees(angle_rads)
 
 def snap_to_nearest_angle(angle, angle_list):
-    """Snaps angle to whichever in angle_list is closest."""
     return min(angle_list, key=lambda a: abs(a - angle))
 
 def smooth_approach(current, target, factor=0.2):
-    """Simple easing/tween approach for animation."""
     return current + (target - current) * factor
 
 # --------------------------------------------------------------------------------
@@ -139,29 +129,38 @@ def smooth_approach(current, target, factor=0.2):
 # --------------------------------------------------------------------------------
 running = True
 while running:
+    now = pygame.time.get_ticks()  # to check double-click timing
+
     for event in pygame.event.get():
         if event.type == pygame.QUIT:
             running = False
 
         elif event.type == pygame.MOUSEBUTTONDOWN:
             if event.button == 1:
+                # Check for double-click
+                time_since_last_click = now - last_click_time
+                if time_since_last_click < DOUBLE_CLICK_TIME:
+                    # Double-click detected => toggle fullscreen
+                    if not fullscreen:
+                        screen = pygame.display.set_mode((WIDTH, HEIGHT), pygame.FULLSCREEN)
+                        fullscreen = True
+                    else:
+                        screen = pygame.display.set_mode((WIDTH, HEIGHT))
+                        fullscreen = False
+                last_click_time = now
+
+                # Single-click dragging logic
                 dragging = True
                 mx, my = event.pos
                 old_angle = get_mouse_angle(mx, my)
-
-                # Enlarge arcs + gauge
                 arc_scale_target    = 1.2
                 gauge_scale_target  = 1.1
 
         elif event.type == pygame.MOUSEBUTTONUP:
             if event.button == 1:
                 dragging = False
-
-                # Return arcs + gauge to normal
                 arc_scale_target   = 1.0
                 gauge_scale_target = 1.0
-
-                # Snap handle angle
                 handle_angle = snap_to_nearest_angle(handle_angle, SNAP_ANGLES)
 
         elif event.type == pygame.MOUSEMOTION:
@@ -170,46 +169,36 @@ while running:
                 new_angle = get_mouse_angle(mx, my)
                 delta_angle = new_angle - old_angle
 
-                # Normalize to [-180..180]
                 if delta_angle > 180:
                     delta_angle -= 360
                 elif delta_angle < -180:
                     delta_angle += 360
 
-                # Rotate handle
                 handle_angle += delta_angle
+                gauge_angle += delta_angle * gauge_rot_speed_factor
 
-                # For lines/dots scale (optional)
-                # Clockwise => enlarge, CCW => shrink
                 if delta_angle < 0:
                     lines_scale_factor += 0.01
                 elif delta_angle > 0:
                     lines_scale_factor -= 0.01
 
-                # Clamp lines_scale_factor
                 if lines_scale_factor < 1.0:
                     lines_scale_factor = 1.0
                 if lines_scale_factor > MAX_SCALE:
                     lines_scale_factor = MAX_SCALE
 
-                # Gauge rotation based on handle movement
-                gauge_angle += delta_angle * gauge_rot_speed_factor
-
                 old_angle = new_angle
 
-    # ------------------- Animate arcs + gauge scales -------------------
+    # Animate arcs + gauge scales
     arc_scale_current    = smooth_approach(arc_scale_current, arc_scale_target, 0.2)
     gauge_scale_current  = smooth_approach(gauge_scale_current, gauge_scale_target, 0.2)
 
-    # Clear screen
     screen.fill(WHITE)
 
-    # 1) Draw lines/dots from PD below everything else
-    #    If you'd like to scale them as well, you can do a transform here
+    # 1) PD lines/dots (beneath everything else)
     for param_name, info in param_images.items():
         if info["active"]:
             for (surf, rect) in info["images"]:
-                # Optionally scale lines/dots if you want them bigger/smaller
                 if lines_scale_factor != 1.0:
                     orig_w, orig_h = surf.get_size()
                     new_w = int(orig_w * lines_scale_factor)
@@ -218,28 +207,25 @@ while running:
                     lines_rect = lines_surf.get_rect(center=(WIDTH//2, HEIGHT//2))
                     screen.blit(lines_surf, lines_rect)
                 else:
-                    # No scaling
                     screen.blit(surf, rect)
 
-    # 2) Draw mask, boldcircle, thincircle as is (no scaling/rotation)
+    # 2) Mask, circles (no scaling)
     screen.blit(mask_surf, mask_rect)
     screen.blit(boldcircle_surf, boldcircle_rect)
     screen.blit(thincircle_surf, thincircle_rect)
 
-    # 3) Draw gauge (scaled + rotated)
-    #    First scale
+    # 3) Gauge (scaled + rotated)
     gw, gh = gauge_surf.get_size()
     new_gw = int(gw * gauge_scale_current)
     new_gh = int(gh * gauge_scale_current)
     gauge_scaled = pygame.transform.scale(gauge_surf, (new_gw, new_gh))
     gauge_scaled_rect = gauge_scaled.get_rect(center=(WIDTH//2, HEIGHT//2))
 
-    #    Then rotate
     gauge_rotated = pygame.transform.rotate(gauge_scaled, -gauge_angle)
     gauge_rot_rect = gauge_rotated.get_rect(center=(WIDTH//2, HEIGHT//2))
     screen.blit(gauge_rotated, gauge_rot_rect)
 
-    # 4) Draw thickArc + thinArc (scaled, no rotation)
+    # 4) ThickArc & ThinArc (scaled)
     tw, th = thickarc_surf.get_size()
     arcw   = int(tw * arc_scale_current)
     arch   = int(th * arc_scale_current)
@@ -254,7 +240,7 @@ while running:
     thinarc_rect = thinarc_scaled.get_rect(center=(WIDTH//2, HEIGHT//2))
     screen.blit(thinarc_scaled, thinarc_rect)
 
-    # 5) Draw handle (rotate only)
+    # 5) Handle (rotated)
     rotated_handle = pygame.transform.rotate(handle_surf, -handle_angle)
     handle_rect = rotated_handle.get_rect(center=(WIDTH//2, HEIGHT//2))
     screen.blit(rotated_handle, handle_rect)
@@ -264,4 +250,5 @@ while running:
 
 pygame.quit()
 sys.exit()
+
 
